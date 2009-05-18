@@ -16,6 +16,10 @@ describe "Basic libdrizzle operation" do
 
     result.affected_rows.should.equal 0
     result.insert_id.should.equal 0
+    
+    result.columns.size.should.equal 2
+    result.columns.should.include :table_schema
+    result.columns.should.include :table_name
   end
 
 end
