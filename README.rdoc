@@ -1,0 +1,3 @@
+Currently a simple client-oriented hookup to libdrizzle with ffi, for querying mysql/drizzle servers.
+
+Not really sure where I'm going with this. Ping me if you have input.
