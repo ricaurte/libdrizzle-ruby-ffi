@@ -31,7 +31,7 @@ module Drizzle
     :DRIZZLE_RETURN_MAX
   ]
 
-  enum :drizzle_con_status, [
+  enum :drizzle_con_status_t, [
     :DRIZZLE_CON_NONE,             0,
     :DRIZZLE_CON_ALLOCATED,        (1 << 0),
     :DRIZZLE_CON_MYSQL,            (1 << 1),
@@ -41,7 +41,7 @@ module Drizzle
     :DRIZZLE_CON_NO_RESULT_READ,   (1 << 5)
   ]
 
-  enum :drizzle_con_options, [
+  enum :drizzle_con_options_t, [
     :DRIZZLE_CON_NONE,             0,
     :DRIZZLE_CON_ALLOCATED,        (1 << 0),
     :DRIZZLE_CON_MYSQL,            (1 << 1),
@@ -50,17 +50,35 @@ module Drizzle
     :DRIZZLE_CON_READY,            (1 << 4),
     :DRIZZLE_CON_NO_RESULT_READ,   (1 << 5)
   ]
+
+  enum :drizzle_options_t, [
+    :DRIZZLE_NONE,         0,
+    :DRIZZLE_ALLOCATED,    (1 << 0),
+    :DRIZZLE_NON_BLOCKING, (1 << 1)
+  ]
+
+  #consts = FFI::ConstGenerator.new do |c|
+  #  c.include 'poll.h'
+  #  c.const("POLLIN")
+  #  c.const("POLLOUT")
+  #end
+
+  #eval consts.to_ruby
+
+  def self.options
+    enum_type(:drizzle_options_t)
+  end
 
   def self.return_codes
     enum_type(:drizzle_return_t)
   end
 
   def self.con_options
-    enum_type(:drizzle_con_options)
+    enum_type(:drizzle_con_options_t)
   end
 
   def self.con_status
-    enum_type(:drizzle_con_status)
+    enum_type(:drizzle_con_status_t)
   end
 
   # Misc
@@ -70,23 +88,33 @@ module Drizzle
   attach_function :create,                :drizzle_create,                    [:pointer],                               :pointer
   attach_function :free,                  :drizzle_free,                      [:pointer],                               :void
   attach_function :error,                 :drizzle_error,                     [:pointer],                               :string
+  attach_function :add_options,           :drizzle_add_options,               [:pointer, :drizzle_options_t],           :void
+  callback        :event_watch_callback,  [:pointer, :short, :pointer],       :drizzle_return_t
+
+  attach_function :set_event_watch,       :drizzle_set_event_watch,           [:pointer, :event_watch_callback, :pointer],        :void
 
   # Connection objects
   attach_function :con_create,            :drizzle_con_create,                [:pointer, :pointer],                     :pointer
   attach_function :con_free,              :drizzle_con_free,                  [:pointer],                               :void
   attach_function :con_set_db,            :drizzle_con_set_db,                [:pointer, :string],                      :void
   attach_function :con_set_auth,          :drizzle_con_set_auth,              [:pointer, :string, :string],             :void
-  attach_function :con_add_options,       :drizzle_con_add_options,           [:pointer, :drizzle_con_options],         :void
+  attach_function :con_add_options,       :drizzle_con_add_options,           [:pointer, :drizzle_con_options_t],       :void
+  attach_function :con_status,            :drizzle_con_status,                [:pointer],                               :int
+  attach_function :con_fd,                :drizzle_con_fd,                    [:pointer],                               :int
+  attach_function :con_clone,             :drizzle_con_clone,                 [:pointer, :pointer, :pointer],           :pointer
+  attach_function :con_set_revents,       :drizzle_con_set_revents,           [:pointer, :short],                       :void
 
   # Querying
   attach_function :query_str,             :drizzle_query_str,                 [:pointer, :pointer, :string, :pointer],  :pointer
 
   # Results
+  attach_function :result_create,         :drizzle_result_create,             [:pointer, :pointer],                     :pointer
   attach_function :result_buffer,         :drizzle_result_buffer,             [:pointer],                               :int
   attach_function :result_free,           :drizzle_result_free,               [:pointer],                               :drizzle_return_t
   attach_function :result_affected_rows,  :drizzle_result_affected_rows,      [:pointer],                               :uint64  
   attach_function :result_insert_id,      :drizzle_result_insert_id,          [:pointer],                               :uint64
   attach_function :row_next,              :drizzle_row_next,                  [:pointer],                               :pointer
+  attach_function :result_read,           :drizzle_result_read,               [:pointer, :pointer, :pointer],           :pointer
 
   # Columns
   attach_function :column_next,           :drizzle_column_next,               [:pointer],                               :pointer
@@ -115,7 +143,7 @@ module Drizzle
         @rowptrs.each do |rowptr|
           row = []
           @columns.size.times do |i|
-            row << rowptr[i].get_string(0)
+            row << (rowptr[i].null? ? "" : rowptr[i].get_string(0))
           end
           yield row if block_given?
           @rows << row
@@ -134,32 +162,96 @@ module Drizzle
   end
 
   class Connection < FFI::AutoPointer
+    attr_accessor :max_cons
+
     def initialize(host, user, pass, db, proto=:DRIZZLE_CON_MYSQL)
       @host, @user, @pass, @db, @proto = host, user, pass, db, proto
       @drizzle = Drizzle.create(nil)
       @conn = Drizzle.con_create(@drizzle, nil)
-      Drizzle.con_add_options(@conn, Drizzle.enum_value(proto))
+      @busy_cons = {}
+      @ready_cons = []
+      @max_cons = 20
+      Drizzle.con_add_options(@conn, Drizzle.enum_value(proto) | Drizzle.enum_value(:DRIZZLE_CON_NO_RESULT_READ))
       Drizzle.con_set_auth(@conn, @user, @pass)
       Drizzle.con_set_db(@conn, @db)
+      @retptr = FFI::MemoryPointer.new(:int)
     end
 
+    # This executes a normal synchronous query. We simply call the async methods together.
     def query(query)
-      ret = FFI::MemoryPointer.new(:int)
-      result = Drizzle.query_str(@conn, nil, query, ret)
-      if Drizzle.return_codes[ret.get_int(0)] != :DRIZZLE_RETURN_OK
-        raise DrizzleException.new("Query failed: #{Drizzle.error(@drizzle)}")
-      end
+      async_result(async_query(query))
+    end
+
+    def async_query(query, proc=nil, &blk)
+      proc ||= blk
+      # Give nil back if we would exceed our max_cons limit.
+      return nil if @busy_cons.size >= @max_cons and @ready_cons.empty?
+      # Get a connection or create one
+      c = @ready_cons.pop || Drizzle.con_clone(@drizzle, nil, @conn)
+      # Attempt to send off the query
+      Drizzle.query_str(c, nil, query, @retptr)
+      # Make sure it was successful
+      handle_error
+
+      # Get the fd, store the info, return fd to caller
+      fd = Drizzle.con_fd(c)
+      @busy_cons[fd] = {:callback => proc, :ptr => c}
+      fd
+    end
+
+    def async_result(fd)
+      return nil unless (h = @busy_cons[fd])
+
+      # Create result packet struct
+      result = Drizzle.result_create(@conn, nil)
+
+      # Do a blocking read into the the packet
+      Drizzle.result_read(h[:ptr], result, @retptr)
+
+      # See if the read was successful
+      handle_error
+
+      # Buffer the result and check
       ret = Drizzle.result_buffer(result)
-      if Drizzle.return_codes[ret] != :DRIZZLE_RETURN_OK
+      if Drizzle.return_codes[@retptr.get_int(0)] != :DRIZZLE_RETURN_OK
+        # Free the result struct if we fail.
+        Drizzle.result_free(result)
         raise DrizzleException.new("Query failed: #{Drizzle.error(@drizzle)}")
       end
 
-      Result.new(result)
+      r = Result.new(result)
+      h[:callback].call(r) if h[:callback]
+      @busy_cons.delete(fd)
+      @ready_cons << h[:ptr] unless (@ready_cons.size + @busy_cons.size) >= @max_cons
+      r
+    end
+
+    def em_query(query, proc=nil, &blk)
+      proc ||= blk
+      fd = async_query(query, proc)
+      EM.attach(fd, EMHandler, self, fd)
+    end
+
+    def handle_error
+      if Drizzle.return_codes[@retptr.get_int(0)] != :DRIZZLE_RETURN_OK
+        raise DrizzleException.new("Query failed: #{Drizzle.error(@drizzle)}")
+      end
     end
 
     def self.release(obj)
+      obj.instance_variable_get("@ready_cons").each {|c| Drizzle.con_free(c)}
+      obj.instance_variable_get("@busy_cons").each {|fd, h| Drizzle.con_free(h[:ptr])}
       Drizzle.con_free(obj.instance_variable_get("@conn"))
       Drizzle.free(obj.instance_variable_get("@drizzle"))
+    end
+  end
+
+  module EMHandler
+    def initialize(obj, fd)
+      @obj, @fd = obj, fd
+    end
+    def notify_readable
+      @obj.async_result(@fd)
     end
   end
 
