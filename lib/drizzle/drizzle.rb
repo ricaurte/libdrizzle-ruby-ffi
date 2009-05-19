@@ -164,7 +164,7 @@ module Drizzle
   class Connection < FFI::AutoPointer
     attr_accessor :max_cons
 
-    def initialize(host, user, pass, db, proto=:DRIZZLE_CON_MYSQL)
+    def initialize(host, user, pass, db=nil, proto=:DRIZZLE_CON_MYSQL)
       @host, @user, @pass, @db, @proto = host, user, pass, db, proto
       @drizzle = Drizzle.create(nil)
       @conn = Drizzle.con_create(@drizzle, nil)
@@ -173,7 +173,7 @@ module Drizzle
       @max_cons = 20
       Drizzle.con_add_options(@conn, Drizzle.enum_value(proto) | Drizzle.enum_value(:DRIZZLE_CON_NO_RESULT_READ))
       Drizzle.con_set_auth(@conn, @user, @pass)
-      Drizzle.con_set_db(@conn, @db)
+      Drizzle.con_set_db(@conn, @db) if @db
       @retptr = FFI::MemoryPointer.new(:int)
     end
 
@@ -230,6 +230,7 @@ module Drizzle
       proc ||= blk
       fd = async_query(query, proc)
       EM.attach(fd, EMHandler, self, fd)
+      fd
     end
 
     def handle_error
@@ -251,6 +252,7 @@ module Drizzle
       @obj, @fd = obj, fd
     end
     def notify_readable
+      detach
       @obj.async_result(@fd)
     end
   end
