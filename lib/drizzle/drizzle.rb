@@ -1,10 +1,11 @@
 module Drizzle
   extend FFI::Library
-  ffi_lib "libdrizzle.dylib"
+  ffi_lib "libdrizzle"
 
   class DrizzleException < RuntimeError; end
 
-  enum :drizzle_return_t, [:DRIZZLE_RETURN_OK,
+  enum :drizzle_return_t, [
+    :DRIZZLE_RETURN_OK,
     :DRIZZLE_RETURN_IO_WAIT,
     :DRIZZLE_RETURN_PAUSE,
     :DRIZZLE_RETURN_ROW_BREAK,
@@ -31,16 +32,6 @@ module Drizzle
     :DRIZZLE_RETURN_MAX
   ]
 
-  enum :drizzle_con_status_t, [
-    :DRIZZLE_CON_NONE,             0,
-    :DRIZZLE_CON_ALLOCATED,        (1 << 0),
-    :DRIZZLE_CON_MYSQL,            (1 << 1),
-    :DRIZZLE_CON_RAW_PACKET,       (1 << 2),
-    :DRIZZLE_CON_RAW_SCRAMBLE,     (1 << 3),
-    :DRIZZLE_CON_READY,            (1 << 4),
-    :DRIZZLE_CON_NO_RESULT_READ,   (1 << 5)
-  ]
-
   enum :drizzle_con_options_t, [
     :DRIZZLE_CON_NONE,             0,
     :DRIZZLE_CON_ALLOCATED,        (1 << 0),
@@ -57,14 +48,6 @@ module Drizzle
     :DRIZZLE_NON_BLOCKING, (1 << 1)
   ]
 
-  #consts = FFI::ConstGenerator.new do |c|
-  #  c.include 'poll.h'
-  #  c.const("POLLIN")
-  #  c.const("POLLOUT")
-  #end
-
-  #eval consts.to_ruby
-
   def self.options
     enum_type(:drizzle_options_t)
   end
@@ -75,10 +58,6 @@ module Drizzle
 
   def self.con_options
     enum_type(:drizzle_con_options_t)
-  end
-
-  def self.con_status
-    enum_type(:drizzle_con_status_t)
   end
 
   # Misc
@@ -120,140 +99,122 @@ module Drizzle
   attach_function :column_next,           :drizzle_column_next,               [:pointer],                               :pointer
   attach_function :column_name,           :drizzle_column_name,               [:pointer],                               :string
 
-  class Result < FFI::AutoPointer
-    attr_reader :columns, :affected_rows, :insert_id
+  class Result
+    attr_reader :columns, :affected_rows, :insert_id, :rows
 
     def initialize(ptr)
-      super(ptr)
-      @rows, @columns, @rowptrs = [], [], []
+      @columns, @rows = [], []
 
-      while (!(column = Drizzle.column_next(self)).null?)
+      @insert_id = Drizzle.result_insert_id(ptr)
+      @affected_rows = Drizzle.result_affected_rows(ptr)
+
+      # Get columns
+      until (column = Drizzle.column_next(ptr)).null?
         @columns << Drizzle.column_name(column).to_sym
       end
 
-      @insert_id = Drizzle.result_insert_id(self)
-      @affected_rows = Drizzle.result_affected_rows(self)
+      # Get rows
+      until (row = Drizzle.row_next(ptr)).null?
+        @rows << row.get_array_of_string(0, @columns.size)
+      end
+
+      # Free the underlying buffers since we just copied it all to Ruby
+      Drizzle.result_free(ptr)
     end
 
     def each
-      if @rows.empty?
-        while (!(row = Drizzle.row_next(self)).null?)
-          @rowptrs << row.read_array_of_pointer(@columns.size)
-        end
-        @rowptrs.each do |rowptr|
-          row = []
-          @columns.size.times do |i|
-            row << (rowptr[i].null? ? "" : rowptr[i].get_string(0))
-          end
-          yield row if block_given?
-          @rows << row
-        end
-      else
-        @rows.each do |row|
-          yield row if block_given?
-        end
+      @rows.each do |row|
+        yield row if block_given?
       end
     end
-
-    def self.release(obj)
-      Drizzle.result_free(obj)
-    end
-
   end
 
   class Connection < FFI::AutoPointer
-    attr_accessor :max_cons
+    attr_accessor :host, :user, :pass, :db, :opts, :fd
 
-    def initialize(host, user, pass, db=nil, proto=:DRIZZLE_CON_MYSQL)
-      @host, @user, @pass, @db, @proto = host, user, pass, db, proto
-      @drizzle = Drizzle.create(nil)
+    def initialize(host, user, pass, db=nil, opts=[], drizzle=nil)
+      opts = opts.is_a?(Array) ? opts : [opts]
+      @host, @user, @pass, @db, @opts = host, user, pass, db, opts
+      @from_pool = true if drizzle
+      @drizzle = drizzle || Drizzle.create(nil)
       @conn = Drizzle.con_create(@drizzle, nil)
-      @busy_cons = {}
-      @ready_cons = []
-      @max_cons = 20
-      Drizzle.con_add_options(@conn, Drizzle.enum_value(proto) | Drizzle.enum_value(:DRIZZLE_CON_NO_RESULT_READ))
+      Drizzle.con_add_options(@conn, opts.inject(0){|i,o| i | Drizzle.enum_value(o)} | Drizzle.enum_value(:DRIZZLE_CON_NO_RESULT_READ))
       Drizzle.con_set_auth(@conn, @user, @pass)
       Drizzle.con_set_db(@conn, @db) if @db
       @retptr = FFI::MemoryPointer.new(:int)
     end
 
-    # This executes a normal synchronous query. We simply call the async methods together.
-    def query(query)
-      async_result(async_query(query))
+    # Indicates whether or not this connection was created using a drizzle_st object from somewhere else.
+    def from_pool?
+      @from_pool
     end
 
+    # This executes a normal synchronous query. We simply call the async methods together.
+    def query(query, proc=nil, &blk)
+      proc ||= blk
+      async_query(query, proc)
+      async_result
+    end
+
+    # Sends off a query to the server. The return value is the file descriptor number of the socket used for this connection, for monitoring with an event loop etc.
     def async_query(query, proc=nil, &blk)
       proc ||= blk
-      # Give nil back if we would exceed our max_cons limit.
-      return nil if @busy_cons.size >= @max_cons and @ready_cons.empty?
-      # Get a connection or create one
-      c = @ready_cons.pop || Drizzle.con_clone(@drizzle, nil, @conn)
-      # Attempt to send off the query
-      Drizzle.query_str(c, nil, query, @retptr)
+      Drizzle.query_str(@conn, nil, query, @retptr)
       # Make sure it was successful
-      handle_error
-
-      # Get the fd, store the info, return fd to caller
-      fd = Drizzle.con_fd(c)
-      @busy_cons[fd] = {:callback => proc, :ptr => c}
-      fd
+      check_error
+      @callback = proc
+      # return fd to caller
+      @fd ||= Drizzle.con_fd(@conn)
     end
 
-    def async_result(fd)
-      return nil unless (h = @busy_cons[fd])
-
-      # Create result packet struct
-      result = Drizzle.result_create(@conn, nil)
-
-      # Do a blocking read into the the packet
-      Drizzle.result_read(h[:ptr], result, @retptr)
+    # Do a blocking read for the result of an outstanding query. This results the Result object as well as fires a callback associated with it.
+    def async_result
+      # Do a partial blocking read into the the packet struct
+      result = Drizzle.result_read(@conn, nil, @retptr)
 
       # See if the read was successful
-      handle_error
+      check_error
 
       # Buffer the result and check
       ret = Drizzle.result_buffer(result)
-      if Drizzle.return_codes[@retptr.get_int(0)] != :DRIZZLE_RETURN_OK
+      if Drizzle.return_codes[ret] != :DRIZZLE_RETURN_OK
         # Free the result struct if we fail.
         Drizzle.result_free(result)
         raise DrizzleException.new("Query failed: #{Drizzle.error(@drizzle)}")
       end
 
+      # Fire and return
       r = Result.new(result)
-      h[:callback].call(r) if h[:callback]
-      @busy_cons.delete(fd)
-      @ready_cons << h[:ptr] unless (@ready_cons.size + @busy_cons.size) >= @max_cons
+      @callback.call(r) if @callback
+      @callback = nil
       r
     end
 
     def em_query(query, proc=nil, &blk)
       proc ||= blk
       fd = async_query(query, proc)
-      EM.attach(fd, EMHandler, self, fd)
-      fd
+      EM.attach(fd, EMHandler, self)
     end
 
-    def handle_error
+    def check_error
       if Drizzle.return_codes[@retptr.get_int(0)] != :DRIZZLE_RETURN_OK
         raise DrizzleException.new("Query failed: #{Drizzle.error(@drizzle)}")
       end
     end
 
-    def self.release(obj)
-      obj.instance_variable_get("@ready_cons").each {|c| Drizzle.con_free(c)}
-      obj.instance_variable_get("@busy_cons").each {|fd, h| Drizzle.con_free(h[:ptr])}
-      Drizzle.con_free(obj.instance_variable_get("@conn"))
-      Drizzle.free(obj.instance_variable_get("@drizzle"))
+    def self.release(conn)
+      Drizzle.con_free(conn.instance_variable_get("@conn"))
+      Drizzle.free(conn.instance_variable_get("@drizzle")) unless conn.from_pool?
     end
   end
 
   module EMHandler
-    def initialize(obj, fd)
-      @obj, @fd = obj, fd
+    def initialize(conn)
+      @conn = conn
     end
     def notify_readable
       detach
-      @obj.async_result(@fd)
+      @conn.async_result
     end
   end
 

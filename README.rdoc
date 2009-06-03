@@ -1,3 +1,42 @@
-Currently a simple client-oriented hookup to libdrizzle with ffi, for querying mysql/drizzle servers.
+Currently a simple client-oriented hookup to libdrizzle with ffi, for querying drizzle and mysql servers.
 
 Not really sure where I'm going with this. Ping me if you have input.
+
+== Synopsis
+
+=== Normal synchronous query
+
+ irb(main):001:0> require 'rubygems'
+ => true
+ irb(main):002:0> require 'lib/drizzle'
+ => true
+ irb(main):003:0> c = Drizzle::Connection.new("127.0.0.1", "root", "password", nil, :DRIZZLE_CON_MYSQL)
+ => #<Native Pointer address=0x0>
+ irb(main):004:0> r = c.query("select now()")
+ => #<Drizzle::Result:0x12f4dc8 @rows=[["2009-05-21 07:41:26"]], @columns=[:"now()"], @affected_rows=0, @insert_id=0>
+ irb(main):005:0> r.each {|row| puts row[0] }
+ 2009-05-21 07:41:26
+ => [["2009-05-21 07:41:26"]]
+ irb(main):006:0> r.columns
+ => [:"now()"]
+
+=== Async query with EventMachine
+
+ irb(main):001:0> require 'rubygems'
+ => true
+ irb(main):002:0> require 'lib/drizzle'
+ r=> true
+ irb(main):003:0> require 'eventmachine'
+ => true
+ irb(main):004:0> c = Drizzle::Connection.new("127.0.0.1", "root", "password", "mysql", :DRIZZLE_CON_MYSQL)
+ => #<Native Pointer address=0x0>
+ irb(main):005:0> EM.run {
+ irb(main):006:1*   c.em_query("show tables") do |result|
+ irb(main):007:2*     p result.columns
+ irb(main):008:2>     p result.rows
+ irb(main):009:2>   end
+ irb(main):010:1> }
+
+ [:Tables_in_mysql]
+
+ [["columns_priv"], ["db"], ["func"], ["help_category"], ["help_keyword"], ["help_relation"], ["help_topic"], ["host"], ["proc"], ["procs_priv"], ["tables_priv"], ["time_zone"], ["time_zone_leap_second"], ["time_zone_name"], ["time_zone_transition"], ["time_zone_transition_type"], ["user"], ["user_info"]]
