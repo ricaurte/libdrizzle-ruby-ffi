@@ -128,16 +128,28 @@ module Drizzle
       end
     end
   end
+  
+  class Drizzleptr < FFI::AutoPointer
+    def self.release(ptr)
+      Drizzle.free(ptr)
+    end
+  end
+  
+  class Connptr < FFI::AutoPointer
+    def self.release(ptr)
+      Drizzle.conn_free(ptr)
+    end
+  end
 
-  class Connection < FFI::AutoPointer
+  class Connection
     attr_accessor :host, :user, :pass, :db, :opts, :fd
 
     def initialize(host, user, pass, db=nil, opts=[], drizzle=nil)
       opts = opts.is_a?(Array) ? opts : [opts]
       @host, @user, @pass, @db, @opts = host, user, pass, db, opts
       @from_pool = true if drizzle
-      @drizzle = drizzle || Drizzle.create(nil)
-      @conn = Drizzle.con_create(@drizzle, nil)
+      @drizzle = drizzle || Drizzleptr.new(Drizzle.create(nil))
+      @conn = Connptr.new(Drizzle.con_create(@drizzle, nil))
       Drizzle.con_add_options(@conn, opts.inject(0){|i,o| i | Drizzle.enum_value(o)} | Drizzle.enum_value(:DRIZZLE_CON_NO_RESULT_READ))
       Drizzle.con_set_auth(@conn, @user, @pass)
       Drizzle.con_set_db(@conn, @db) if @db
@@ -202,10 +214,6 @@ module Drizzle
       end
     end
 
-    def self.release(conn)
-      Drizzle.con_free(conn.instance_variable_get("@conn"))
-      Drizzle.free(conn.instance_variable_get("@drizzle")) unless conn.from_pool?
-    end
   end
 
   module EMHandler
