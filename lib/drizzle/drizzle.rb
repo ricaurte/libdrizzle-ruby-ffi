@@ -205,7 +205,7 @@ module Drizzle
     def em_query(query, proc=nil, &blk)
       proc ||= blk
       fd = async_query(query, proc)
-      EM.attach(fd, EMHandler, self)
+      EM.watch(fd, EMHandler, self) {|c| c.notify_readable = true}
     end
 
     def check_error
