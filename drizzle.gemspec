@@ -1,7 +1,7 @@
 Gem::Specification.new do |s|
   s.name = "drizzle-ffi"
-  s.version = "0.0.1"
-  s.date = "2009-08-03"
+  s.version = "0.0.2"
+  s.date = "2009-08-07"
   s.authors = ["Jake Douglas"]
   s.email = "jakecdouglas@gmail.com"
   s.has_rdoc = false
