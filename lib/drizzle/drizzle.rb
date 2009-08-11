@@ -68,9 +68,6 @@ module Drizzle
   attach_function :free,                  :drizzle_free,                      [:pointer],                               :void
   attach_function :error,                 :drizzle_error,                     [:pointer],                               :string
   attach_function :add_options,           :drizzle_add_options,               [:pointer, :drizzle_options_t],           :void
-  callback        :event_watch_callback,  [:pointer, :short, :pointer],       :drizzle_return_t
-
-  attach_function :set_event_watch,       :drizzle_set_event_watch,           [:pointer, :event_watch_callback, :pointer],        :void
 
   # Connection objects
   attach_function :con_create,            :drizzle_con_create,                [:pointer, :pointer],                     :pointer
@@ -81,7 +78,6 @@ module Drizzle
   attach_function :con_status,            :drizzle_con_status,                [:pointer],                               :int
   attach_function :con_fd,                :drizzle_con_fd,                    [:pointer],                               :int
   attach_function :con_clone,             :drizzle_con_clone,                 [:pointer, :pointer, :pointer],           :pointer
-  attach_function :con_set_revents,       :drizzle_con_set_revents,           [:pointer, :short],                       :void
 
   # Querying
   attach_function :query_str,             :drizzle_query_str,                 [:pointer, :pointer, :string, :pointer],  :pointer
