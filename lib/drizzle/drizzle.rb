@@ -78,6 +78,7 @@ module Drizzle
   attach_function :con_status,            :drizzle_con_status,                [:pointer],                               :int
   attach_function :con_fd,                :drizzle_con_fd,                    [:pointer],                               :int
   attach_function :con_clone,             :drizzle_con_clone,                 [:pointer, :pointer, :pointer],           :pointer
+  attach_function :con_set_tcp,           :drizzle_con_set_tcp,               [:pointer, :string, :int],                :void
 
   # Querying
   attach_function :query_str,             :drizzle_query_str,                 [:pointer, :pointer, :string, :pointer],  :pointer
@@ -148,6 +149,7 @@ module Drizzle
       @conn = Connptr.new(Drizzle.con_create(@drizzle, nil))
       Drizzle.con_add_options(@conn, opts.inject(0){|i,o| i | Drizzle.enum_value(o)} | Drizzle.enum_value(:DRIZZLE_CON_NO_RESULT_READ))
       Drizzle.con_set_auth(@conn, @user, @pass)
+      Drizzle.con_set_tcp(@conn, @host, (opts.include?(:DRIZZLE_CON_MYSQL) ? 3306 : 4427))
       Drizzle.con_set_db(@conn, @db) if @db
       @retptr = FFI::MemoryPointer.new(:int)
     end
