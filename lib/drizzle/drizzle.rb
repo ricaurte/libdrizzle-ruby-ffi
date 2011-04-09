@@ -1,6 +1,6 @@
 module Drizzle
   extend FFI::Library
-  ffi_lib "libdrizzle"
+  ffi_lib "drizzle"
 
   class DrizzleException < RuntimeError; end
 
