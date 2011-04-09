@@ -134,7 +134,7 @@ module Drizzle
   
   class Connptr < FFI::AutoPointer
     def self.release(ptr)
-      Drizzle.conn_free(ptr)
+      Drizzle.con_free(ptr)
     end
   end
 
